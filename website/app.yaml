@@ -1,0 +1,5 @@
+runtime: python39  # Or your preferred version like python312
+instance_class: F1
+
+# The entrypoint tells GAE to use Gunicorn to run the 'server' variable in 'main.py'
+entrypoint: gunicorn -b :$PORT main.py:server
