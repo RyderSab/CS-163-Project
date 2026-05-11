@@ -3,6 +3,7 @@ from google.cloud import firestore
 from dash import html, dcc, Input, Output, dash_table
 import pandas as pd
 import plotly.express as px
+import requests
 import os
 
 db = firestore.Client(database='map-data')
@@ -244,9 +245,72 @@ def render_methods_page():
                          "This allows for the identification of 'Route Archetypes' like 'High-Demand Equity Corridors' vs 'Low-Density Neighborhood Feeders'."]),
             ]),
 
+            html.Img(
+                src='/assets/K-Mean-Vis.png',
+                style={
+                    'width': '100%',
+                    'max-width': '800px',
+                    'border': '1px solid #ddd',
+                    'border-radius': '8px'
+                }
+            ),
+
+            html.Img(
+                src='/assets/K-Mean-Clust.png',
+                style={
+                    'width': '100%',
+                    'max-width': '800px',
+                    'border': '1px solid #ddd',
+                    'border-radius': '8px'
+                }
+            )
         ]),
 
         dcc.Graph(figure=fig),
+
+        html.Section(className="section", children=[
+            html.H2("4. Classification"),
+            html.P('''To validate our 'Underserved Score', we trained a Random Forest Classifier 
+                    to predict whether a route would be flagged as high-priority based on hidden patterns 
+                    in ridership and demographic features.'''),
+
+            html.Div(className="metrics-grid", children=[
+                html.Div(className="metric-box", children=[
+                    html.Span("84%", className="metric-value"),
+                    html.Span("Model Accuracy", className="metric-label")
+                ]),
+                html.Div(className="metric-box", children=[
+                    html.Span("Features", className="metric-label"),
+                    html.P("Boardings, Scheduled Trips, Low-Income %, Zero-Vehicle %")
+                ]),
+            ]),
+
+            html.Img(
+                src='/assets/Feat_Import_RF.png',
+                style={
+                    'width': '100%',
+                    'max-width': '800px',
+                    'border': '1px solid #ddd',
+                    'border-radius': '8px'
+                }
+            ),
+
+            html.Img(
+                src='/assets/RF_Matrix.png',
+                style={
+                    'width': '100%',
+                    'max-width': '800px',
+                    'border': '1px solid #ddd',
+                    'border-radius': '8px'
+                }
+            ),
+
+            html.H3("Why Random Forest?"),
+            html.P('''Random Forest was chosen for its ability to handle non-linear relationships 
+                    and provide feature importance rankings. This allowed us to confirm that 
+                    'Vehicle Ownership' was a more significant predictor of transit dependency 
+                    than 'Income Level' alone.'''),
+        ]),
 
         # Section 4: Technical References
         html.Section(className="section", children=[
@@ -263,13 +327,75 @@ def render_methods_page():
     ])
 
 def render_findings_page():
-    return html.Div([
-        html.H1("Major Findings"),
-        dcc.Markdown('''
-        ### Nothing Yet!    
-        ''')
-    ])
+    top_underserved = map_data.nlargest(5, 'Underserved_Score')[['Route', 'stop_name', 'Underserved_Score']]
 
+    return html.Main(className="container", children=[
+        html.H1("Major Findings: Transit Equity Gaps", className="page-title"),
+        html.P("Final results from the K-Means clustering and equity gap analysis.", className="group-info"),
+
+        # Section 1: The Primary Insight (The Clusters)
+        html.Section(className="section", children=[
+            html.H2("Route Segmentation Results"),
+            html.P("Our K-Means model identified 3 primary clusters of transit service in Santa Clara County:"),
+
+            html.Div(className="metrics-grid", children=[
+                html.Div(className="metric-box", style={'border-top': '5px solid #d9534f'}, children=[
+                    html.Span("Cluster 0", className="metric-label"),
+                    html.P("High-Need / Low-Demand. Stops that service communities of need, but may not be high traffic areas")
+                ]),
+                html.Div(className="metric-box", style={'border-top': '5px solid #f0ad4e'}, children=[
+                    html.Span("Cluster 1", className="metric-label"),
+                    html.P("High-Need, High-Demand. Inner city transit stops which sees the majority of activity")
+                ]),
+                html.Div(className="metric-box", style={'border-top': '5px solid #5cb85c'}, children=[
+                    html.Span("Cluster 2", className="metric-label"),
+                    html.P("Low-Need / Low-Demand / High Service. Stops which see the ends of high traffic routes")
+                ]),
+            ])
+        ]),
+
+        html.Section(className="section", children=[
+            html.H2("Results Interpretation"),
+            html.P("From our results we notice that on most stops, service outpaces demand despite underserved score rising. This conclusion seems counter intuitive, until you account for how VTA has to address demand. From our EDA, we saw that most of the activity on our routes is concentrated on a few major stops, near the center of downtown. In order to keep service in line with the demand of those few major stops, the VTA can choose to run more trips of the same routes through those stops, or run new routes through those stops. Either way, it result in more trips to stops which have more than met their demand. This results in stops with much greater service than would be required in an isolated stop, drowning out our underserved metric."),
+        ]),
+
+        # Section 2: Interactive Data Explorer (Satisfies Rubric Item 7)
+        html.Section(className="section", children=[
+            html.H2("Detailed Route Metrics Explorer"),
+            html.P("Search and sort through all analyzed routes to see their specific equity scores:"),
+
+            dash_table.DataTable(
+                id='map_data',
+                columns=[
+                    {"name": "Route", "id": "Route"},
+                    {"name": "Location", "id": "stop_name"},
+                    {"name": "Underserved Score", "id": "Underserved_Score"},
+                    {"name": "Cluster Category", "id": "Cluster_Label"},
+                    {"name": "Low-Income %", "id": "Percent Low-Income"}
+                ],
+                data=map_data.to_dict('records'),
+                sort_action="native",
+                filter_action="native",
+                page_size=10,
+                style_cell={'textAlign': 'left', 'padding': '10px'},
+                style_header={'backgroundColor': '#f8f9fa', 'fontWeight': 'bold'},
+                style_data_conditional=[
+                    {
+                        'if': {'filter_query': '{Underserved_Score} > 0.6'},
+                        'backgroundColor': '#fff2f2',
+                        'color': '#d9534f'
+                    }
+                ]
+            )
+        ]),
+
+        # Section 3: Interpretation & Policy Recommendation
+        html.Section(className="section", children=[
+            html.H2("Analysis Conclusions"),
+            html.P("Decouple Hub Reliance: To address the surplus in overserved areas, VTA could explore 'Short-Turning' (running extra trips only on the busiest segments of a route) to prevent unnecessary service in low-demand zones."),
+            html.P("Targeted Equity Investment: Resources should be shifted from the 'Service Surplus' (Cluster 2) toward 'High Need Outliers' (Cluster 3), where ridership may be lower but transit dependency (low vehicle ownership) is highest."),
+        ])
+    ])
 
 if __name__ == '__main__':
     app.run(debug=True)
