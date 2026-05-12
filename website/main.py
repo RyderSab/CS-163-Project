@@ -1,10 +1,18 @@
 import dash
 from google.cloud import firestore
-from dash import html, dcc, Input, Output, dash_table
+from dash import html, dcc, Input, Output, State, dash_table
 import pandas as pd
 import plotly.express as px
-import requests
+import json
 import os
+
+import requests
+
+# Base URL for the Inference Cloud Run service (override per environment).
+INFERENCE_SERVICE_URL = os.environ.get(
+    "INFERENCE_SERVICE_URL",
+    "https://transit-inference-service-428591046247.us-west2.run.app",
+).rstrip("/")
 
 db = firestore.Client(database='map-data')
 
@@ -40,7 +48,7 @@ fig = px.scatter_map(
 
 
 
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
 
 server = app.server
 
@@ -59,6 +67,108 @@ def display_page(pathname):
     else:
         # Default to landing page (Home)
         return render_landing_page()
+
+
+@app.callback(
+    Output("findings-inference-output", "children"),
+    Input("findings-predict-btn", "n_clicks"),
+    State("findings-route-dropdown", "value"),
+    prevent_initial_call=True,
+)
+def fetch_cloud_run_prediction(n_clicks, route_id):
+    if not route_id:
+        return html.P("Select a route before running a prediction.", style={"color": "#666"})
+
+    url = f"{INFERENCE_SERVICE_URL}/predict"
+    try:
+        resp = requests.get(url, params={"route_id": route_id}, timeout=45)
+    except requests.RequestException as exc:
+        return html.Div(
+            [
+                html.P("Could not reach the inference service.", style={"color": "#d9534f", "fontWeight": "600"}),
+                html.Pre(str(exc), style={"fontSize": "13px", "whiteSpace": "pre-wrap"}),
+            ]
+        )
+
+    if resp.status_code != 200:
+        detail = (resp.text or "")[:500]
+        err_children = [
+            html.P(
+                f"Inference service returned HTTP {resp.status_code}.",
+                style={"color": "#d9534f", "fontWeight": "600"},
+            ),
+        ]
+        if detail:
+            err_children.append(
+                html.Pre(detail, style={"fontSize": "13px", "whiteSpace": "pre-wrap"})
+            )
+        return html.Div(err_children)
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        return html.P("Response was not valid JSON.", style={"color": "#d9534f"})
+
+    if "error" in payload:
+        return html.P(payload["error"], style={"color": "#d9534f"})
+
+    underserved = payload.get("is_underserved_prediction")
+    score = payload.get("underserved_score")
+    forecast = payload.get("next_month_forecast")
+    metrics = payload.get("metrics") or {}
+
+    forecast_display = f"{forecast:.4f}" if forecast is not None else "— (no Prophet model for this route)"
+
+    return html.Div(
+        className="metrics-grid",
+        children=[
+            html.Div(
+                className="metric-box",
+                children=[
+                    html.Span("Route", className="metric-label"),
+                    html.P(str(payload.get("route_id", route_id))),
+                ],
+            ),
+            html.Div(
+                className="metric-box",
+                children=[
+                    html.Span("Underserved (RF)", className="metric-label"),
+                    html.P("Yes" if underserved == 1 else "No" if underserved == 0 else str(underserved)),
+                ],
+            ),
+            html.Div(
+                className="metric-box",
+                children=[
+                    html.Span("Underserved score", className="metric-label"),
+                    html.P(f"{float(score):.4f}" if score is not None else "—"),
+                ],
+            ),
+            html.Div(
+                className="metric-box",
+                children=[
+                    html.Span("Next month forecast (Prophet)", className="metric-label"),
+                    html.P(forecast_display),
+                ],
+            ),
+            html.Div(
+                style={"gridColumn": "1 / -1", "marginTop": "8px"},
+                children=[
+                    html.Strong("Input features sent to the RF: "),
+                    html.Pre(
+                        json.dumps(metrics, indent=2),
+                        style={
+                            "fontSize": "13px",
+                            "backgroundColor": "#f8f9fa",
+                            "padding": "12px",
+                            "borderRadius": "6px",
+                            "border": "1px solid #dee2e6",
+                        },
+                    ),
+                ],
+            ),
+        ],
+    )
+
 
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
@@ -154,6 +264,43 @@ def render_EDA_page():
     return html.Main(className="container", children=[
         html.H1("Exploratory Data Analysis", className="page-title"),
         html.P("A low-level overview of VTA ridership and Santa Clara County demographics.", className="group-info"),
+
+        html.Section(className="section", children=[
+            html.H2("Integrated Route Metrics"),
+            html.P("""Below is a preview of our processed dataset. This table combines VTA 
+                operational metrics with Census-level demographic indicators."""),
+
+            dash_table.DataTable(
+                data=map_data.to_dict('records'),
+                columns=[
+                    {"name": "Route", "id": "Route"},
+                    {"name": "Stop Name", "id": "stop_name"},
+                    {"name": "Activity (Board+Alight)", "id": "AVG_ACTIVITY"},
+                    {"name": "Low-Income %", "id": "Percent Low-Income"},
+                    {"name": "Zero-Vehicle %", "id": "Percent Zero-Vehicle Household"}
+                ],
+                style_table={'overflowX': 'auto'},
+                style_cell={
+                    'textAlign': 'left',
+                    'padding': '10px',
+                    'fontFamily': 'Inter, sans-serif'
+                },
+                style_header={
+                    'backgroundColor': '#f8f9fa',
+                    'fontWeight': 'bold',
+                    'border': '1px solid #dee2e6'
+                },
+                page_size=10,
+                sort_action="native",
+                filter_action="native",
+            )
+        ]),
+
+        html.Section(className="section", children=[
+            html.H2("Data Distribution Summary"),
+            html.P("Our dataset consists of 672 unique route-stop observations across Santa Clara County."),
+
+        ]),
 
         # Section 1: Volume Analysis
         html.Section(className="section", children=[
@@ -394,7 +541,46 @@ def render_findings_page():
             html.H2("Analysis Conclusions"),
             html.P("Decouple Hub Reliance: To address the surplus in overserved areas, VTA could explore 'Short-Turning' (running extra trips only on the busiest segments of a route) to prevent unnecessary service in low-demand zones."),
             html.P("Targeted Equity Investment: Resources should be shifted from the 'Service Surplus' (Cluster 2) toward 'High Need Outliers' (Cluster 3), where ridership may be lower but transit dependency (low vehicle ownership) is highest."),
-        ])
+        ]),
+
+        # Live inference from Cloud Run (same API as /predict on the inference service)
+        html.Section(className="section", children=[
+            html.H2("Live route predictions"),
+            html.P(
+                "The Random Forest and Prophet models deployed on Cloud Run can be queried "
+                "for any route ID in the inference dataset. Select a route from the map data "
+                "and run a prediction to see the model output.",
+                style={"maxWidth": "720px"},
+            ),
+            dcc.Dropdown(
+                id="findings-route-dropdown",
+                options=[
+                    {"label": f"Route {r}", "value": r}
+                    for r in sorted(
+                        map_data["Route"].dropna().astype(str).str.strip().unique()
+                    )
+                ],
+                placeholder="Select a route ID…",
+                clearable=True,
+                style={"maxWidth": "420px", "marginBottom": "12px"},
+            ),
+            html.Button(
+                "Run prediction",
+                id="findings-predict-btn",
+                n_clicks=0,
+                style={
+                    "padding": "8px 18px",
+                    "cursor": "pointer",
+                    "backgroundColor": "#007bff",
+                    "color": "white",
+                    "border": "none",
+                    "borderRadius": "6px",
+                    "fontWeight": "600",
+                },
+            ),
+            html.Div(id="findings-inference-output", style={"marginTop": "20px"}),
+        ]),
+
     ])
 
 if __name__ == '__main__':

@@ -3,3 +3,4 @@ pandas
 gunicorn
 plotly
 google-cloud-firestore
+requests
